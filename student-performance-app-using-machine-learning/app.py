@@ -8,8 +8,17 @@ import matplotlib.pyplot as plt
 import io
 import base64
 from fpdf import FPDF  # Added for PDF export
+import os
+from werkzeug.utils import secure_filename
+from ocr_utils import extract_scores_from_image
 
 app = Flask(__name__)
+UPLOAD_FOLDER = "uploads"
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+
+# Ensure uploads folder exists
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
 CORS(app)
 
 # Load trained model
@@ -37,6 +46,24 @@ distance_map = {"far": 1, "moderate": 3, "near": 5}
 income_map = {"low": 1, "medium": 3, "high": 5}
 teacher_map = {"low": 1, "medium": 3, "high": 5}
 
+# ---------------- GPA CONVERSION (NEW ADDITION) ----------------
+def percentage_to_gpa(percentage):
+    if percentage >= 85:
+        return 4.00
+    elif percentage >= 80:
+        return 3.70
+    elif percentage >= 75:
+        return 3.30
+    elif percentage >= 70:
+        return 3.00
+    elif percentage >= 65:
+        return 2.70
+    elif percentage >= 60:
+        return 2.30
+    else:
+        return 2.00
+# ---------------------------------------------------------------
+
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -51,6 +78,10 @@ def predict():
         def get_val(key, default=0):
             return data.get(key, default)
 
+        # Use OCR-extracted scores if provided
+        previous_score = float(get_val("Previous_Scores", 50))
+        previous_cgpa = float(get_val("Previous_CGPA", 3.0))
+
         features = [
             float(get_val("Hours_Studied", 0)),
             float(get_val("Attendance", 0)),
@@ -58,7 +89,7 @@ def predict():
             resource_map.get(get_val("Access_to_Resources", "medium").lower(), 3),
             yes_no_map.get(get_val("Extracurricular_Activities", "no").lower(), 0),
             float(get_val("Sleep_Hours", 7)),
-            float(get_val("Previous_Scores", 50)),
+            previous_score,  # Use OCR value
             motivation_map.get(get_val("Motivation_Level", "medium").lower(), 3),
             yes_no_map.get(get_val("Internet_Access", "yes").lower(), 1),
             int(get_val("Tutoring_Sessions", 0)),
@@ -77,10 +108,12 @@ def predict():
 
         # Model prediction
         raw_prediction = model.predict(features_df)[0]
-        score = raw_prediction
+
+        # Ensure predicted score is not less than extracted OCR score
+        score = max(raw_prediction, previous_score)
 
         # Post-processing boost
-        if float(get_val("Previous_Scores", 0)) >= 85:
+        if previous_score >= 85:
             score += 12
         if float(get_val("Hours_Studied", 0)) >= 8:
             score += 10
@@ -91,8 +124,14 @@ def predict():
 
         score = round(min(100, max(35, score)), 2)
 
+        # ---------------- GPA / SGPA / CGPA (NEW ADDITION) ----------------
+        predicted_gpa = percentage_to_gpa(score)
+        predicted_sgpa = predicted_gpa
+        predicted_cgpa = round((previous_cgpa + predicted_sgpa) / 2, 2)
+        # -----------------------------------------------------------------
+
         # Trend analysis
-        previous = float(get_val("Previous_Scores", 0))
+        previous = previous_score
         current = score
         if current > previous:
             trend = "up"
@@ -106,7 +145,7 @@ def predict():
 
         # Graph generation
         plt.figure(figsize=(5, 3))
-        plt.plot(["Previous Score", "Predicted Score"], [previous, current], marker="o", color="blue")
+        plt.plot(["Previous Score", "Predicted Score"], [previous, current], marker="o")
         plt.ylim(0, 100)
         plt.title("Student Performance Trend")
         plt.ylabel("Score")
@@ -118,9 +157,11 @@ def predict():
         graph = base64.b64encode(img.getvalue()).decode()
         plt.close()
 
-        # Return JSON with prediction, trend, message, and graph
         return jsonify({
             "predicted_score": current,
+            "predicted_gpa": predicted_gpa,
+            "predicted_sgpa": predicted_sgpa,
+            "predicted_cgpa": predicted_cgpa,
             "trend": trend,
             "message": message,
             "graph": graph
@@ -136,17 +177,17 @@ def download_report():
     try:
         data = request.get_json()
         predicted_score = data.get("predicted_score", 0)
+        predicted_gpa = data.get("predicted_gpa", 0)
+        predicted_sgpa = data.get("predicted_sgpa", 0)
+        predicted_cgpa = data.get("predicted_cgpa", 0)
         message = data.get("message", "")
         graph_base64 = data.get("graph", "")
 
-        # Decode the graph
         graph_bytes = base64.b64decode(graph_base64)
 
-        # Save graph as PNG temporarily
         with open("temp_graph.png", "wb") as f:
             f.write(graph_bytes)
 
-        # Create PDF
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
@@ -154,11 +195,14 @@ def download_report():
         pdf.ln(10)
 
         pdf.set_font("Arial", "", 12)
-        pdf.multi_cell(0, 8, f"Predicted Score: {predicted_score}")
+        pdf.multi_cell(0, 8, f"Predicted Percentage: {predicted_score}%")
+        pdf.multi_cell(0, 8, f"Predicted GPA: {predicted_gpa}")
+        pdf.multi_cell(0, 8, f"Predicted SGPA: {predicted_sgpa}")
+        pdf.multi_cell(0, 8, f"Predicted CGPA: {predicted_cgpa}")
         pdf.multi_cell(0, 8, f"Message: {message}")
         pdf.ln(10)
-        pdf.image("temp_graph.png", x=30, w=150)
 
+        pdf.image("temp_graph.png", x=30, w=150)
         pdf.output("student_report.pdf")
 
         return jsonify({"success": True, "message": "Report generated as student_report.pdf"})
@@ -166,6 +210,29 @@ def download_report():
     except Exception as e:
         print("PDF Error:", e)
         return jsonify({"error": str(e)})
+
+# ------------------- OCR Upload Route -------------------
+@app.route("/upload_image", methods=["POST"])
+def upload_image():
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"})
+
+    file = request.files["image"]
+    filename = secure_filename(file.filename)
+
+    # Create folder if it does not exist
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
+    path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+    file.save(path)
+
+    # Call OCR utility
+    extracted_data = extract_scores_from_image(path)
+
+    return jsonify({
+        "message": "Image processed successfully",
+        "extracted_data": extracted_data
+    })
 
 # --------------------------------------------------------
 

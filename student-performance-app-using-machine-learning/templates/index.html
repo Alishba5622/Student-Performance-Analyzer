@@ -220,7 +220,21 @@
     <!-- Result & Download -->
     <div id="result"></div>
     <div style="margin-top: 20px;">
-      <button id="downloadBtn" class="button" style="background:#00cc88">Download Report (PDF)</button>
+      <button id="downloadBtn" class="button" style="background:#00cc88">
+        Download Report (PDF)
+      </button>
+    </div>
+
+    <!-- OCR Upload Section -->
+    <div style="margin-top:30px; max-width:500px;">
+      <h2>📷 Upload Result Image (OCR)</h2>
+
+      <input type="file" id="ocrImage" accept="image/*">
+      <button class="button" onclick="uploadResultImage()">
+        Extract GPA / CGPA
+      </button>
+
+      <div id="ocrResult" style="margin-top:15px;"></div>
     </div>
   </div>
 
@@ -332,6 +346,49 @@
         pdf.save("Student_Performance_Report.pdf");
       });
     });
+
+    // ===== OCR Functionality =====
+    function uploadResultImage() {
+      const fileInput = document.getElementById("ocrImage");
+      const resultDiv = document.getElementById("ocrResult");
+
+      if (!fileInput.files.length) {
+        alert("Please select an image first!");
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("image", fileInput.files[0]);
+
+      fetch("/upload_image", {
+        method: "POST",
+        body: formData
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.error) {
+          resultDiv.innerHTML = "<p>Error: " + data.error + "</p>";
+          return;
+        }
+
+        const extracted = data.extracted_data;
+
+        resultDiv.innerHTML = `
+          <p><strong>Extracted Percentage:</strong> ${extracted.Previous_Scores}%</p>
+          <p><strong>Extracted CGPA:</strong> ${extracted.Previous_CGPA}</p>
+        `;
+
+        // Optional: auto-fill previous score
+        const prevScoreInput = document.querySelector("input[name='Previous_Scores']");
+        if (prevScoreInput) {
+          prevScoreInput.value = extracted.Previous_Scores;
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        resultDiv.innerHTML = "<p>OCR failed. Try another image.</p>";
+      });
+    }
   </script>
 </body>
 </html>
